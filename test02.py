@@ -36,10 +36,10 @@ for i,j in zip(dir2, dir4):
 
     parser.add_argument('--data', type=str, default='JFNG_data_15min', help='data')
     parser.add_argument('--root_path', type=str, default='./real_data/', help='root path of the data file')
-    parser.add_argument('--data_path', type=str, default=i, help='data file')
+    parser.add_argument('--data_path', type=str, default=j, help='data file')
     parser.add_argument('--features', type=str, default='MS', help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
     parser.add_argument('--target', type=str, default='tp', help='target feature in S or MS task')
-    parser.add_argument('--freq', type=str, default='5t', help='freq for time features encoding, options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], you can also use more detailed freq like 15min or 3h')
+    parser.add_argument('--freq', type=str, default='15t', help='freq for time features encoding, options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], you can also use more detailed freq like 15min or 3h')
     parser.add_argument('--checkpoints', type=str, default='./checkpoints/', help='location of model checkpoints')
 
     parser.add_argument('--seq_len', type=int, default=96, help='input sequence length of Informer encoder')
@@ -108,7 +108,7 @@ for i,j in zip(dir2, dir4):
         'hkws_3_5':{'data':'hkws_3_5.csv','T':'tp','M':[5,5,5],'S':[1,1,1],'MS':[5,5,1]},
         'YLJ01_5_1':{'data':'YLJ01_5_1.csv','T':'tp','M':[1,1,1],'S':[1,1,1],'MS':[1,1,1]},
         # 'hkws_4_5':{'data':'hkws_4_5.csv','T':'tp','M':[5,5,5],'S':[1,1,1],'MS':[5,5,1]},
-        'JFNG_data_15min': {'data': 'B04.csv', 'T': 'tp', 'M': [6, 6, 1], 'S': [1, 1, 1], 'MS': [6, 6, 1]},
+        'JFNG_data_15min': {'data': i, 'T': 'tp', 'M': [6, 6, 1], 'S': [1, 1, 1], 'MS': [6, 6, 1]},
     }
     
     if args.data in data_parser.keys():
@@ -119,7 +119,7 @@ for i,j in zip(dir2, dir4):
 
     # add data into data_parser
     if args.data not in data_parser.keys():
-        data_parser.update({j:{ 'data':i, 'T': args.target, 'M': [5, 5, 5], 'S': [1, 1, 1], 'MS': [5, 5, 1]},} )
+        data_parser.update({j:{ 'data':i, 'T': args.target, 'M': [6, 6, 6], 'S': [1, 1, 1], 'MS': [6, 6, 1]},} )
         if args.data in data_parser.keys():
             data_info = data_parser[args.data]
             args.data_path = data_info['data']
@@ -166,3 +166,5 @@ for i,j in zip(dir2, dir4):
 
     i =+ 1
     j =+ 1
+
+

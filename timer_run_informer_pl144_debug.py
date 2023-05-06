@@ -57,8 +57,7 @@ compat：兼容elasticsearch版本为6.8.2
 """
 
 global seq_len
-global site_name
-
+global time_frq
 
 # 分割时间
 def split_time(start_timestamp, end_timestamp):
@@ -140,7 +139,7 @@ def read_database(index_name, start_t, end_t, site_name):
     return data
 
 
-def dynamic_window(winsize, win_max, gnss_data, hws_data, resample_time):
+def dynamic_window(time_step, winsize, win_max, gnss_data, hws_data, resample_time):
     flag = 1
     while flag:
         t1 = resample_time - winsize  # i*5*60 5min interval；  【-0.5*60，0.5*60】window length
@@ -148,44 +147,53 @@ def dynamic_window(winsize, win_max, gnss_data, hws_data, resample_time):
         tmp_data = gnss_data[(gnss_data['timestamp'] > int(t1)) & (gnss_data['timestamp'] < int(t2))]
         mean_data = tmp_data.loc[:, ['ztd', 'latitude', 'longitude', 'height']].mean(0)
         tmp_hwsdata = hws_data[(hws_data['timestamp'] > int(t1)) & (hws_data['timestamp'] < int(t2))]
-        mean_hwsdata = (tmp_hwsdata.loc[:, ['Ta', 'Pa', 'Ta']].mean(0))
+        mean_hwsdata = (tmp_hwsdata.loc[:, ['Ta', 'Pa', 'Ua', 'Sm']].mean(0))
         winsize = winsize * 2
         if (tmp_data.shape[0]) >= 1 & tmp_hwsdata.shape[0] >= 1:
             flag = 0
         if winsize > win_max:
             flag = 0
-    t1 = resample_time - 2.5 * 60  # i*5*60 5min interval；  【-0.5*60，0.5*60】window length
-    t2 = resample_time + 2.5 * 60
+    resample_time_utc = pd.to_datetime(resample_time, unit='s')
+    t1 = resample_time - time_step/2 * 60  # i*time_step*60 time_step minutes interval
+    t2 = resample_time + time_step/2 * 60
     tmp_hwsdata = hws_data[(hws_data['timestamp'] > int(t1)) & (hws_data['timestamp'] < int(t2))]
     Rc_data = tmp_hwsdata['Rc'].values
     Rc_diff = Rc_data[-1] - Rc_data[0]
+    if Rc_diff<0:  # 降雨传感器，每天零点会重置时间；因此跨越零点的时候，需要做特别处理
+        max_v=np.max(Rc_data,axis=0)  #找到前天的降雨积累最大值
+        tmp_rf=max_v-Rc_data[0] #得到前一天的降雨差值
+        Rc_diff = Rc_data[-1]+tmp_rf #得到最终的降雨差值
+
     mean_hwsdata['Rc'] = Rc_diff
     return mean_data, mean_hwsdata
 
 
-def resampling(now_time, gnss_data, hws_data, winsize, win_max):
-    # resample real_data and interpolate those missing values
+def resampling(now_time, gnss_data, hws_data, time_step, winsize, win_max):
+    # function: resample real_data and interpolate those missing values
+    # input:
+    # now_time, gnss_data, hws_data,
+    # time_step: time interval for every data point (unit = minute)
+    # winsize, win_max: averaging window size (unit = second)
     now_time_utc = pd.to_datetime(now_time, unit='s')
-    near_minute = np.floor(now_time_utc.minute / 5) * 5
+    near_minute = np.floor(now_time_utc.minute / time_step) * time_step
     end_time_utc = now_time_utc.replace(minute=near_minute.astype(int), second=0, microsecond=0)
-    start_time_utc = end_time_utc - datetime.timedelta(minutes=seq_len * 5)  # 根据seqlen=96，得到起始时间
+    start_time_utc = end_time_utc - datetime.timedelta(minutes=seq_len * time_step)  # 根据seqlen=96，得到起始时间
     # resample_time = pd.date_range(start=start_time_utc, end=end_time_utc, freq='5min') # 产生重采样时间点集合
     end_time_unix = calendar.timegm(end_time_utc.timetuple())
     resample_time = calendar.timegm(start_time_utc.timetuple())
     resamp_data = pd.DataFrame(None,
-                               index=['t2m(k)', 'sp(Pa)', 'd2m(k)', 'tp', 'ztd', 'latitude', 'longitude', 'height'])
+                               index=['t2m', 'sp', 'rh', 'wind_speed', 'tp', 'ztd', 'latitude', 'longitude', 'height'])
 
     for i in range(seq_len):
-        re_time = resample_time + (i) * 5 * 60
+        re_time = resample_time + (i) * time_step * 60
         # 动态改变窗口大小，获取时间窗口内平均值
-        mean_data, mean_hwsdata = dynamic_window(winsize, win_max, gnss_data, hws_data, re_time)
+        mean_data, mean_hwsdata = dynamic_window(time_step, winsize, win_max, gnss_data, hws_data, re_time)
         # 拼接数据
         s = pd.concat([mean_hwsdata, mean_data], axis=0).to_frame()
-        s.index = ['t2m(k)', 'sp(Pa)', 'd2m(k)', 'tp', 'ztd', 'latitude', 'longitude', 'height']
+        s.index = ['t2m', 'sp', 'rh', 'wind_speed','tp', 'ztd', 'latitude', 'longitude', 'height']
         resamp_data = pd.concat([resamp_data, s], axis=1, ignore_index=True)
 
-    time_dt = pd.DataFrame(np.arange(resample_time, end_time_unix, 5 * 60))
-    resamp_data.loc[resamp_data.shape[0]] = np.arange(resample_time, end_time_unix, 5 * 60)
+    resamp_data.loc[resamp_data.shape[0]] = np.arange(resample_time, end_time_unix, time_step * 60)
     resamp_data = resamp_data.rename(index={resamp_data.shape[0] - 1: 'date'})
     # resamp_data.drop(columns=0)
     resamp_data = resamp_data.T
@@ -233,37 +241,47 @@ def get_data(now_time, history_time, site_name):
     hws_data['Pa'] = hws_data['Pa'].astype(float)
     hws_data['Rc'] = hws_data['Rc'].astype(float)
     hws_data['Ua'] = hws_data['Ua'].astype(float)
+    hws_data['Sm'] = hws_data['Sm'].astype(float)
     # hws_data['time'] = pd.to_datetime(hws_data['time'], unit='s')
     # print(real_data)
     ##############
-    resamp_data = resampling(now_time, gnss_data, hws_data, 30, 30 * 6)  # 重采样数据
+    resamp_data = resampling(now_time, gnss_data, hws_data, time_freq, 30, 30 * 6)  # 重采样数据
     """
     读取数据，写入csv文件中
     """
-    resamp_data.iloc[:, 0:8] = resamp_data.iloc[:, 0:8].interpolate(method='linear', order=1, limit=10,
+    resamp_data.iloc[:, 0:9] = resamp_data.iloc[:, 0:9].interpolate(method='linear', order=1, limit=10,
                                                                     limit_direction='both')  #
-    resamp_data["t2m(k)"] = resamp_data["t2m(k)"].astype(float)
-    resamp_data["t2m(k)"] = resamp_data[["t2m(k)"]].apply(lambda x: x["t2m(k)"] + 273.15, axis=1)
-    resamp_data["d2m(k)"] = resamp_data["d2m(k)"].astype(float)
-    resamp_data["d2m(k)"] = resamp_data[["d2m(k)"]].apply(lambda x: x["d2m(k)"] + 274, axis=1)
-    resamp_data["sp(Pa)"] = resamp_data["sp(Pa)"].astype(float)
-    resamp_data["tp"] = resamp_data["tp"].astype(float)
-    resamp_data["tp"] = resamp_data[["tp"]].apply(lambda x: x["tp"] + 0.0001, axis=1)  # avoid nan when all zeros
+    resamp_data["t2m"] = resamp_data["t2m"].astype(float)
+    resamp_data["t2m"] = resamp_data[["t2m"]].apply(lambda x: x["t2m"] + 273.15, axis=1)
+    resamp_data["t2m"] = resamp_data[["t2m"]].apply(lambda x: round(x["t2m"], 2), axis=1)
+    resamp_data["sp"] = resamp_data["sp"].astype(float)
+    resamp_data["sp"] = resamp_data[["sp"]].apply(lambda x: round(x["sp"], 2), axis=1)
+    resamp_data["rh"] = resamp_data["rh"].astype(float)
+    resamp_data["rh"] = resamp_data[["rh"]].apply(lambda x: round(x["rh"], 2), axis=1)
+    resamp_data["wind_speed"] = resamp_data["wind_speed"].astype(float)
+    resamp_data["wind_speed"] = resamp_data[["wind_speed"]].apply(lambda x: round(x["wind_speed"], 2), axis=1)
 
+    resamp_data["tp"] = resamp_data["tp"].astype(float)
+    resamp_data["tp"] = resamp_data[["tp"]].apply(lambda x: round(x["tp"],2) , axis=1)
+    resamp_data["tp"] = resamp_data[["tp"]].apply(lambda x: x["tp"] + 1e-5, axis=1)  # avoid nan when all zeros
+    resamp_data.loc[10,"tp"] = resamp_data.loc[10,"tp"] + 1e-4
     # calculate PWV
     ztd_data = resamp_data.loc[:, 'ztd']
-    t_data = resamp_data.loc[:, 't2m(k)']
-    p_data = resamp_data.loc[:, 'sp(Pa)']
+    t_data = resamp_data.loc[:, 't2m']
+    p_data = resamp_data.loc[:, 'sp']
     lat_data = resamp_data.loc[:, 'latitude']
     h_data = resamp_data.loc[:, 'height']
     pwv = calc_pwv(ztd_data, t_data, p_data, lat_data, h_data)
     #
-    data_csv = resamp_data[['date', 't2m(k)', 'sp(Pa)', 'd2m(k)']]  # 重组数据
-    data_csv.insert(4, 'pwv', pwv)
-    data_csv.insert(5, 'tp', resamp_data.loc[:, 'tp'])  # 重组数据
+    data_csv = resamp_data[['date', 't2m', 'sp', 'rh', 'wind_speed']]  # 重组数据
+    data_csv.insert(5, 'pwv', pwv)
+    data_csv.loc[:,"pwv"] = data_csv.loc[:,"pwv"].astype(float)
+    data_csv["pwv"] = data_csv[["pwv"]].apply(lambda x: round(x["pwv"], 2), axis=1)
+    data_csv.insert(6, 'tp', resamp_data.loc[:, 'tp'])  # 重组数据
+
 
     data_csv.to_csv('./real_data/{}.csv'.format(site_name), index=False)
-    print('done')
+    print('read data done')
     flag = 1
     return flag
 
@@ -275,19 +293,7 @@ def run_model():
         print(line)
     retval = p.wait()
 
-
-def write_database(now_time, site_name):
-    now_time_utc = pd.to_datetime(now_time, unit='s')
-    near_minute = np.floor(now_time_utc.minute / 5) * 5
-    end_time_utc = now_time_utc.replace(minute=near_minute.astype(int), second=0, microsecond=0)
-    end_time_unix = calendar.timegm(end_time_utc.timetuple())
-
-    loaddata = np.load(
-        './results/informer_ftMS_sl96_ll48_pl144_dm512_nh8_el2_dl1_df2048_atprob_fc5_ebtimeF_dtTrue_mxTrue_test_0/real_prediction_{}.npy'.format(
-            site_name))
-    data_log = pd.DataFrame(loaddata[:, :, 0], index=['prediction_rainfall'])
-    data_log.insert(data_log.shape[1], 'time', pd.to_datetime(now_time, unit='s'))
-    data_log.to_csv('./log/prediction_log.csv', mode='a')
+def write_database(loaddata, end_time_unix,site_name):
     es = Elasticsearch(hosts=["172.16.20.3:9200"], http_auth=('gnss', 'YKY7csX#'),
                        scheme="http")
     action_body = ''
@@ -301,7 +307,7 @@ def write_database(now_time, site_name):
     # print(action_body)
     """
     index：predict_rainfall 预测降雨量
-    
+
     doc_type：固定为_doc
     """
     result = es.bulk(body=action_body, index="predict_rainfall", doc_type="_doc")
@@ -312,18 +318,32 @@ def write_database(now_time, site_name):
     """
     print(result)
 
+def save_data(now_time, site_name):
+    now_time_utc = pd.to_datetime(now_time, unit='s')
+    near_minute = np.floor(now_time_utc.minute / 5) * 5
+    end_time_utc = now_time_utc.replace(minute=near_minute.astype(int), second=0, microsecond=0)
+    end_time_unix = calendar.timegm(end_time_utc.timetuple())
+
+    loaddata = np.load(
+        './results/informer_JFNG_data_15min_ftMS_sl96_ll48_pl24_dm512_nh8_el2_dl1_df2048_atprob_fc5_ebtimeF_dtTrue_mxTrue_test_0/real_prediction_{}.npy'.format(
+            site_name))
+    data_log = pd.DataFrame(loaddata[:, :, 0], index=['prediction_rainfall'])
+    data_log.insert(data_log.shape[1], 'time', pd.to_datetime(now_time, unit='s'))
+    data_log.to_csv('./log/prediction_log.csv', mode='a')
+    #write_database(loaddata, end_time_unix, site_name)
+
 
 # 定时系统
 def job(now_time):  # 定时任务
     print("I'm working...")
-    time_interval = seq_len / 12 * 60 * 60  # 8小时的历史数据 = seqlen=96
+    time_interval = seq_len / 4 * 60 * 60  # 8小时的历史数据 = seqlen=96
     history_time = now_time - time_interval - 10 * 60  # 8小时的历史数据 = seqlen=96; 10*60: 预留空间
     site_name = "B04"  # 读取xx站点的数据库
     print(time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(history_time)))  # 当前时间
     flag = get_data(now_time, history_time, site_name)
     if flag == 1:
         run_model()
-        write_database(now_time, site_name)
+        save_data(now_time, site_name)
         print('Successfully Done')
     else:
         print('No valid data')
@@ -336,8 +356,8 @@ def job(now_time):  # 定时任务
 # schedule.every(10).seconds.do(job)
 
 if __name__ == '__main__':
-    seq_len = 96+24
-    count_n = 60
+    seq_len = 96+24 # 模型seq_len
+    time_freq = 15  # 模型时间分辨率 单位:分钟
     td = datetime.timedelta(hours=8)  # timedelta 对象，8小时
     bjt = datetime.timezone(td)  # 时区对象
     start_time = datetime.datetime(2023, 4, 17, 23, 0, 0,tzinfo=bjt)
