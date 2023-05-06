@@ -274,7 +274,7 @@ class Exp_Informer(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
-        np.save(folder_path + 'real_prediction.npy', preds)
+        np.save(folder_path + 'real_prediction_{}.npy'.format(self.args.data_path.split('.')[0]), preds)
 
         return
 
